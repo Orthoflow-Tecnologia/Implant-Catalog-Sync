@@ -16,8 +16,10 @@ function sessionFrom(client: pg.PoolClient): Session {
 export class PgDatabase implements Database {
   private readonly pool: pg.Pool
 
-  constructor(connectionString: string) {
+  // Sem listener, o encerramento de uma conexão ociosa (restart do Postgres) derruba o processo e deixa o lock preso.
+  constructor(connectionString: string, onIdleError: (error: Error) => void) {
     this.pool = new pg.Pool({ connectionString, max: 4, application_name: 'implant-catalog-sync' })
+    this.pool.on('error', onIdleError)
   }
 
   async query<T extends SqlRow = SqlRow>(text: string, params: readonly unknown[] = []): Promise<T[]> {

@@ -1,6 +1,6 @@
 {
   "name": "implant-catalog-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sincronizador agendado de catálogos de implantes e enxertos",
   "scripts": {
     "test": "tsx --test test/*.test.ts",

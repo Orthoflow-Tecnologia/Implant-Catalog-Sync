@@ -28,7 +28,9 @@ if (unknown.length > 0) {
 }
 const selected = requested.length === 0 ? registry : registry.filter((source) => requested.includes(source.id))
 
-const database = new PgDatabase(config.databaseUrl)
+const database = new PgDatabase(config.databaseUrl, (error) =>
+  logger.warn('conexão ociosa com o banco encerrada; o pool abrirá outra', { error }),
+)
 try {
   const applied = await migrate(database)
   if (applied.length > 0) logger.info('migrations aplicadas', { applied })
