@@ -1,4 +1,5 @@
 import type { Queryable, Session } from '../db/database.js'
+import type { Logger } from '../log.js'
 
 export type PublishCounts = {
   created: number
@@ -7,9 +8,13 @@ export type PublishCounts = {
   retired: number
 }
 
-export type PublishContext = {
+export type VersionContext = {
   runId: string
   now: Date
+}
+
+export type PublishContext = VersionContext & {
+  logger: Logger
 }
 
 export type Extraction = {
@@ -18,14 +23,22 @@ export type Extraction = {
   publish(tx: Session, context: PublishContext): Promise<PublishCounts>
 }
 
+export type SourceDocument = {
+  url: string
+  body: Buffer
+}
+
+export type FetchPage = (url: string) => Promise<string>
+
 export type Source = {
   id: string
-  url: string
   allowedHosts: readonly string[]
   contentTypes: readonly string[]
   license: string
   defaultIntervalHours: number
+  // Lista os documentos da execução; fontes com índice (página de downloads, sitemap) descobrem as URLs a cada ciclo.
+  locate(fetchPage: FetchPage): Promise<readonly string[]>
   // Deve lançar erro quando o formato da fonte mudar: a execução falha e o catálogo publicado fica intacto.
-  extract(payload: Buffer): Extraction
+  extract(documents: readonly SourceDocument[]): Promise<Extraction>
   countPublished(db: Queryable): Promise<number>
 }

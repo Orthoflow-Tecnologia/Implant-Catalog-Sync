@@ -7,15 +7,17 @@ import { runSource, type RunnerDependencies } from '../src/sync/runner.js'
 import type { Source } from '../src/sync/source.js'
 import { PgliteDatabase } from './pglite-database.js'
 
+const fakeUrl = 'https://fonte.example/itens.json'
+
 const fakeSource: Source = {
   id: 'fake',
-  url: 'https://fonte.example/itens.json',
   allowedHosts: ['fonte.example'],
   contentTypes: ['application/json'],
   license: 'teste',
   defaultIntervalHours: 24,
-  extract(payload) {
-    const items: unknown = JSON.parse(payload.toString('utf8'))
+  locate: async () => [fakeUrl],
+  async extract([document]) {
+    const items: unknown = JSON.parse(document?.body.toString('utf8') ?? '')
     if (!Array.isArray(items)) throw new Error('formato inesperado')
     const names = items.filter((item): item is string => typeof item === 'string')
     return {
@@ -50,7 +52,7 @@ type Harness = {
 function json(value: unknown, etag = '"v1"'): DownloadResult {
   return {
     status: 'downloaded',
-    url: fakeSource.url,
+    url: fakeUrl,
     body: Buffer.from(JSON.stringify(value)),
     etag,
     lastModified: null,
@@ -83,6 +85,7 @@ async function harness(): Promise<Harness> {
       holder: 'teste',
       lockLeaseMinutes: 60,
       maxDropRatio: 0.2,
+      retainPayloadMaxBytes: 1024,
       intervalHours: (source) => source.defaultIntervalHours,
       now: () => clock.now,
     },

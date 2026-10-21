@@ -11,7 +11,7 @@ const request: DownloadRequest = {
 }
 
 function downloader(fetch: FetchFunction, maxBytes = 1024) {
-  return createDownloader({ timeoutMs: 1000, maxBytes, attempts: 3, fetch, sleep: async () => {} })
+  return createDownloader({ timeoutMs: 1000, maxBytes, attempts: 3, robots: async () => true, fetch, sleep: async () => {} })
 }
 
 test('aceita apenas HTTPS em host permitido, sem credenciais nem porta alternativa', () => {

@@ -12,6 +12,7 @@ export type SyncConfig = {
   }
   lockLeaseMinutes: number
   maxDropRatio: number
+  retainPayloadMaxBytes: number
 }
 
 export class ConfigError extends Error {
@@ -80,10 +81,11 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): SyncConfig 
     intervalHours,
     http: {
       timeoutMs: positiveInteger(source, 'HTTP_TIMEOUT_MS', 120_000),
-      maxBytes: positiveInteger(source, 'HTTP_MAX_BYTES', 100 * 1024 * 1024),
+      maxBytes: positiveInteger(source, 'HTTP_MAX_BYTES', 200 * 1024 * 1024),
       attempts: positiveInteger(source, 'HTTP_ATTEMPTS', 3),
     },
     lockLeaseMinutes: positiveInteger(source, 'SYNC_LOCK_LEASE_MINUTES', 60),
     maxDropRatio,
+    retainPayloadMaxBytes: positiveInteger(source, 'SYNC_RETAIN_PAYLOAD_MAX_BYTES', 30 * 1024 * 1024),
   }
 }

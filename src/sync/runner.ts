@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { gzipSync } from 'node:zlib'
-import type { Database } from '../db/database.js'
+import { gunzipSync, gzipSync } from 'node:zlib'
+import type { Database, Queryable } from '../db/database.js'
 import type { Downloaded, Downloader } from '../http/download.js'
 import type { Logger } from '../log.js'
-import type { Source } from './source.js'
+import type { Source, SourceDocument } from './source.js'
 
 export type Trigger = 'schedule' | 'manual'
 
@@ -20,6 +20,7 @@ export type RunnerDependencies = {
   holder: string
   lockLeaseMinutes: number
   maxDropRatio: number
+  retainPayloadMaxBytes: number
   intervalHours(source: Source): number
   now?: () => Date
 }
@@ -34,8 +35,22 @@ export class SuspiciousDropError extends Error {
 // O cron dispara no mesmo minuto todo dia; sem folga, uma execução 30s mais lenta empurraria a próxima para o dia seguinte.
 const scheduleGraceMs = 15 * 60 * 1000
 const hourMs = 60 * 60 * 1000
+const pageContentTypes = ['text/html', 'application/xml', 'text/xml']
 
-type Baseline = { id: string; checksum: string; etag: string | null; last_modified: string | null }
+type BaselineDocument = { url: string; source_record_id: string; checksum: string; etag: string | null; last_modified: string | null }
+type Baseline = { checksum: string; documents: Map<string, BaselineDocument> }
+type Fetched = { url: string; recordId: string; checksum: string; body: Buffer | null }
+
+function sha256(body: Buffer): string {
+  return createHash('sha256').update(body).digest('hex')
+}
+
+function combinedChecksum(documents: readonly Fetched[]): string {
+  const [only] = documents
+  if (documents.length === 1 && only) return only.checksum
+  const lines = documents.map((document) => `${document.url} ${document.checksum}`).sort()
+  return createHash('sha256').update(lines.join('\n')).digest('hex')
+}
 
 async function isDue(database: Database, source: Source, intervalHours: number, now: Date): Promise<boolean> {
   const [row] = await database.query<{ last: Date | null }>(
@@ -63,16 +78,30 @@ async function releaseLock(database: Database, sourceId: string, holder: string)
 }
 
 async function baselineFor(database: Database, sourceId: string): Promise<Baseline | null> {
-  const [row] = await database.query<Baseline>(
-    `SELECT r.id, r.checksum, r.etag, r.last_modified
-     FROM catalog_sync.sync_runs s
-     JOIN catalog_sync.source_records r ON r.id = s.source_record_id
-     WHERE s.source_id = $1 AND s.status IN ('succeeded', 'unchanged')
-     ORDER BY s.started_at DESC
+  const [run] = await database.query<{ id: string; checksum: string }>(
+    `SELECT id, checksum FROM catalog_sync.sync_runs
+     WHERE source_id = $1 AND status IN ('succeeded', 'unchanged') AND checksum IS NOT NULL
+     ORDER BY started_at DESC
      LIMIT 1`,
     [sourceId],
   )
-  return row ?? null
+  if (!run) return null
+  const documents = await database.query<BaselineDocument>(
+    `SELECT d.url, r.id AS source_record_id, r.checksum, r.etag, r.last_modified
+     FROM catalog_sync.sync_run_documents d
+     JOIN catalog_sync.source_records r ON r.id = d.source_record_id
+     WHERE d.run_id = $1`,
+    [run.id],
+  )
+  return { checksum: run.checksum, documents: new Map(documents.map((document) => [document.url, document])) }
+}
+
+async function storedPayload(database: Database, recordId: string): Promise<Buffer | null> {
+  const [row] = await database.query<{ payload_gzip: Uint8Array | null }>(
+    'SELECT payload_gzip FROM catalog_sync.source_records WHERE id = $1',
+    [recordId],
+  )
+  return row?.payload_gzip ? gunzipSync(row.payload_gzip) : null
 }
 
 async function storeSourceRecord(
@@ -81,7 +110,9 @@ async function storeSourceRecord(
   downloaded: Downloaded,
   checksum: string,
   now: Date,
+  retainPayloadMaxBytes: number,
 ): Promise<string> {
+  const payload = downloaded.body.byteLength <= retainPayloadMaxBytes ? gzipSync(downloaded.body) : null
   const [row] = await database.query<{ id: string }>(
     `INSERT INTO catalog_sync.source_records
        (source_id, url, license, checksum, etag, last_modified, content_type, byte_size, payload_gzip, first_fetched_at, last_fetched_at)
@@ -89,7 +120,8 @@ async function storeSourceRecord(
      ON CONFLICT (source_id, checksum) DO UPDATE SET
        last_fetched_at = EXCLUDED.last_fetched_at,
        etag = EXCLUDED.etag,
-       last_modified = EXCLUDED.last_modified
+       last_modified = EXCLUDED.last_modified,
+       payload_gzip = coalesce(catalog_sync.source_records.payload_gzip, EXCLUDED.payload_gzip)
      RETURNING id`,
     [
       source.id,
@@ -100,19 +132,22 @@ async function storeSourceRecord(
       downloaded.lastModified,
       downloaded.contentType,
       downloaded.body.byteLength,
-      gzipSync(downloaded.body),
+      payload,
       now,
     ],
   )
-  if (!row) throw new Error('Falha ao registrar o payload bruto.')
+  if (!row) throw new Error('Falha ao registrar o documento bruto.')
   return row.id
 }
 
-async function finishUnchanged(database: Database, runId: string, sourceRecordId: string, now: Date): Promise<void> {
-  await database.query(
-    `UPDATE catalog_sync.sync_runs SET status = 'unchanged', source_record_id = $2, finished_at = $3 WHERE id = $1`,
-    [runId, sourceRecordId, now],
-  )
+async function recordDocuments(tx: Queryable, runId: string, documents: readonly Fetched[]): Promise<void> {
+  for (const document of documents) {
+    await tx.query('INSERT INTO catalog_sync.sync_run_documents (run_id, source_record_id, url) VALUES ($1, $2, $3)', [
+      runId,
+      document.recordId,
+      document.url,
+    ])
+  }
 }
 
 export async function runSource(
@@ -120,7 +155,7 @@ export async function runSource(
   options: { trigger: Trigger; force: boolean },
   dependencies: RunnerDependencies,
 ): Promise<RunOutcome> {
-  const { database, logger: baseLogger, holder } = dependencies
+  const { database, logger: baseLogger, holder, download } = dependencies
   const now = dependencies.now ?? (() => new Date())
   const logger = baseLogger.child({ source: source.id })
   const startedAt = now()
@@ -151,46 +186,82 @@ export async function runSource(
     runLogger.info('sincronização iniciada')
 
     try {
+      const fetchDocument = (url: string, conditional: BaselineDocument | undefined) =>
+        download({
+          url,
+          allowedHosts: source.allowedHosts,
+          contentTypes: source.contentTypes,
+          etag: conditional?.etag ?? null,
+          lastModified: conditional?.last_modified ?? null,
+        })
+      const fetchPage = async (url: string): Promise<string> => {
+        const page = await download({ url, allowedHosts: source.allowedHosts, contentTypes: pageContentTypes, etag: null, lastModified: null })
+        if (page.status !== 'downloaded') throw new Error(`Página de índice sem conteúdo: ${url}`)
+        return page.body.toString('utf8')
+      }
+
+      const urls = [...new Set(await source.locate(fetchPage))]
+      if (urls.length === 0) throw new Error('A fonte não listou nenhum documento.')
+
       const baseline = await baselineFor(database, source.id)
-      const result = await dependencies.download({
-        url: source.url,
-        allowedHosts: source.allowedHosts,
-        contentTypes: source.contentTypes,
-        etag: options.force ? null : (baseline?.etag ?? null),
-        lastModified: options.force ? null : (baseline?.last_modified ?? null),
-      })
-
-      if (result.status === 'not-modified') {
-        if (!baseline) throw new Error('Fonte respondeu 304 sem payload anterior registrado.')
-        await finishUnchanged(database, run.id, baseline.id, now())
-        runLogger.info('fonte sem alterações (HTTP 304)')
-        return { sourceId: source.id, status: 'unchanged', runId: run.id }
+      const fetched: Fetched[] = []
+      for (const url of urls) {
+        const previous = baseline?.documents.get(url)
+        const result = await fetchDocument(url, options.force ? undefined : previous)
+        if (result.status === 'not-modified') {
+          if (!previous) throw new Error(`Fonte respondeu 304 sem documento anterior registrado: ${url}`)
+          fetched.push({ url, recordId: previous.source_record_id, checksum: previous.checksum, body: null })
+          continue
+        }
+        const checksum = sha256(result.body)
+        const recordId = await storeSourceRecord(database, source, result, checksum, now(), dependencies.retainPayloadMaxBytes)
+        fetched.push({ url, recordId, checksum, body: result.body })
       }
 
-      const checksum = createHash('sha256').update(result.body).digest('hex')
-      const sourceRecordId = await storeSourceRecord(database, source, result, checksum, now())
+      const checksum = combinedChecksum(fetched)
       if (!options.force && baseline?.checksum === checksum) {
-        await finishUnchanged(database, run.id, sourceRecordId, now())
-        runLogger.info('payload idêntico ao último publicado', { checksum })
+        await database.transaction(async (tx) => {
+          await recordDocuments(tx, run.id, fetched)
+          await tx.query(`UPDATE catalog_sync.sync_runs SET status = 'unchanged', checksum = $2, finished_at = $3 WHERE id = $1`, [
+            run.id,
+            checksum,
+            now(),
+          ])
+        })
+        runLogger.info('documentos idênticos aos da última publicação', { checksum, documents: fetched.length })
         return { sourceId: source.id, status: 'unchanged', runId: run.id }
       }
 
-      const extraction = source.extract(result.body)
+      const documents: SourceDocument[] = []
+      for (const document of fetched) {
+        let body = document.body ?? (await storedPayload(database, document.recordId))
+        if (body === null) {
+          const again = await fetchDocument(document.url, undefined)
+          if (again.status !== 'downloaded' || sha256(again.body) !== document.checksum) {
+            throw new Error(`Documento mudou durante a execução: ${document.url}`)
+          }
+          body = again.body
+        }
+        documents.push({ url: document.url, body })
+      }
+
+      const extraction = await source.extract(documents)
       const previous = await source.countPublished(database)
       if (previous > 0 && extraction.captured < previous * (1 - dependencies.maxDropRatio)) {
         throw new SuspiciousDropError(previous, extraction.captured)
       }
 
       const counts = await database.transaction(async (tx) => {
-        const published = await extraction.publish(tx, { runId: run.id, now: startedAt })
+        const published = await extraction.publish(tx, { runId: run.id, now: startedAt, logger: runLogger })
+        await recordDocuments(tx, run.id, fetched)
         await tx.query(
           `UPDATE catalog_sync.sync_runs SET
-             status = 'succeeded', source_record_id = $2, captured = $3, rejected = $4,
+             status = 'succeeded', checksum = $2, captured = $3, rejected = $4,
              created = $5, updated = $6, unchanged = $7, retired = $8, finished_at = $9
            WHERE id = $1`,
           [
             run.id,
-            sourceRecordId,
+            checksum,
             extraction.captured,
             extraction.rejected,
             published.created,
@@ -204,6 +275,7 @@ export async function runSource(
       })
       runLogger.info('sincronização concluída', {
         checksum,
+        documents: fetched.length,
         captured: extraction.captured,
         rejected: extraction.rejected,
         ...counts,

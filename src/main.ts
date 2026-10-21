@@ -5,6 +5,7 @@ import { ConfigError, loadConfig } from './config.js'
 import { migrate } from './db/migrate.js'
 import { PgDatabase } from './db/pg-database.js'
 import { createDownloader } from './http/download.js'
+import { createRobotsPolicy } from './http/robots.js'
 import { createLogger } from './log.js'
 import { sources as registry } from './sources/index.js'
 import { runSources } from './sync/runner.js'
@@ -40,11 +41,15 @@ try {
     { trigger: values.force ? 'manual' : 'schedule', force: values.force },
     {
       database,
-      download: createDownloader(config.http),
+      download: createDownloader({
+        ...config.http,
+        robots: createRobotsPolicy({ fetch: (url, init) => fetch(url, init), timeoutMs: config.http.timeoutMs }),
+      }),
       logger,
       holder: `${hostname()}:${process.pid}:${randomUUID()}`,
       lockLeaseMinutes: config.lockLeaseMinutes,
       maxDropRatio: config.maxDropRatio,
+      retainPayloadMaxBytes: config.retainPayloadMaxBytes,
       intervalHours: (source) => config.intervalHours[source.id] ?? source.defaultIntervalHours,
     },
   )

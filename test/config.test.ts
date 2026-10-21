@@ -8,7 +8,7 @@ test('exige DATABASE_URL e aplica padrões', () => {
   assert.equal(config.logLevel, 'info')
   assert.equal(config.sources, null)
   assert.equal(config.maxDropRatio, 0.2)
-  assert.deepEqual(config.http, { timeoutMs: 120_000, maxBytes: 100 * 1024 * 1024, attempts: 3 })
+  assert.deepEqual(config.http, { timeoutMs: 120_000, maxBytes: 200 * 1024 * 1024, attempts: 3 })
 })
 
 test('lê fontes e intervalos por fonte', () => {

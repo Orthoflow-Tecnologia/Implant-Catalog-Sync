@@ -1,3 +1,5 @@
+import { userAgent, type RobotsPolicy } from './robots.js'
+
 export type FetchFunction = (url: string, init: RequestInit) => Promise<Response>
 
 export type DownloadRequest = {
@@ -25,6 +27,7 @@ export type DownloaderOptions = {
   timeoutMs: number
   maxBytes: number
   attempts: number
+  robots: RobotsPolicy
   fetch?: FetchFunction
   sleep?: (ms: number) => Promise<void>
 }
@@ -83,12 +86,13 @@ function mediaType(contentType: string | null): string | null {
 }
 
 async function attempt(request: DownloadRequest, options: Required<DownloaderOptions>): Promise<DownloadResult> {
-  const headers: Record<string, string> = { 'user-agent': 'implant-catalog-sync/0.1 (+https://github.com/Orthoflow-Tecnologia/Implant-Catalog-Sync)' }
+  const headers: Record<string, string> = { 'user-agent': userAgent }
   if (request.etag) headers['if-none-match'] = request.etag
   if (request.lastModified) headers['if-modified-since'] = request.lastModified
 
   let url = assertAllowedUrl(request.url, request.allowedHosts)
   for (let redirects = 0; ; redirects += 1) {
+    if (!(await options.robots(url))) throw new DownloadError(`robots.txt de ${url.hostname} não permite ${url.pathname}.`, false)
     let response: Response
     try {
       response = await options.fetch(url.href, {
