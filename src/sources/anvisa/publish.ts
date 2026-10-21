@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Session } from '../../db/database.js'
-import type { PublishContext, PublishCounts } from '../../sync/source.js'
+import type { VersionContext, PublishCounts } from '../../sync/source.js'
 import type { Registration } from './parse.js'
 
 type Existing = { id: string; number: string; content_hash: string; in_source: boolean }
@@ -15,7 +15,7 @@ async function recordVersion(
   change: 'created' | 'updated' | 'retired' | 'restored',
   hash: string,
   data: unknown,
-  context: PublishContext,
+  context: VersionContext,
 ): Promise<void> {
   await tx.query(
     `INSERT INTO catalog_sync.regulatory_record_versions (regulatory_record_id, run_id, change, content_hash, data, recorded_at)
@@ -42,7 +42,7 @@ function values(registration: Registration): unknown[] {
 export async function publishRegistrations(
   tx: Session,
   registrations: readonly Registration[],
-  context: PublishContext,
+  context: VersionContext,
 ): Promise<PublishCounts> {
   const existing = new Map(
     (
